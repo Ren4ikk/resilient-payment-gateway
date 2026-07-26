@@ -4,6 +4,7 @@ services:
       context: .
     environment:
       PROVIDER_URL: http://provider-simulator:8081
+      DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments
     ports:
       - "8080:8080"
     healthcheck:
@@ -18,6 +19,9 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   provider-simulator:
     image: ghcr.io/fintech-dev-lab/internship-provider-simulator:v0.2.0
