@@ -41,11 +41,13 @@ class EventType(str, enum.Enum):
 operation_status_enum = SqlEnum(
     OperationStatus,
     name="operation_status",
+    metadata=Base.metadata,
 )
 
 event_type_enum = SqlEnum(
     EventType,
     name="event_type",
+    metadata=Base.metadata,
 )
 
 
