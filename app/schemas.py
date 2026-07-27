@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.models import OperationStatus
+
 
 _AMOUNT_PATTERN = re.compile(r"^(?:0|[1-9]\d{0,17})(?:\.\d{1,2})?$")
 
@@ -52,3 +54,16 @@ class OperationCreateRequest(BaseModel):
             raise ValueError("amount must be greater than zero")
 
         return amount
+
+
+class OperationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    operation_id: str = Field(serialization_alias="operationId")
+    amount: Decimal
+    currency: Literal["RUB"]
+    description: str | None
+    status: OperationStatus
+    provider_payment_id: str | None = Field(
+        serialization_alias="providerPaymentId"
+    )

@@ -6,6 +6,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
+from app.models import Event, EventType, Operation, OperationStatus
+from app.schemas import OperationCreateRequest, OperationResponse
 
 app = FastAPI(
     title="Resilient payment gateway",
@@ -34,3 +36,40 @@ async def health(session: DatabaseSession) -> dict[str, str]:
         ) from error
 
     return {"status": "ok"}
+
+
+@app.post(
+    "/operations",
+    response_model=OperationResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["operations"],
+    summary="Create operation",
+)
+async def create_operation(
+    payload: OperationCreateRequest,
+    session: DatabaseSession,
+) -> OperationResponse:
+    operation = Operation(
+        operation_id=payload.operation_id,
+        amount=payload.amount,
+        currency=payload.currency,
+        description=payload.description,
+        status=OperationStatus.CREATED,
+        provider_payment_id=None,
+    )
+
+    event = Event(
+        operation_id=payload.operation_id,
+        type=EventType.CREATED,
+        from_status=None,
+        to_status=OperationStatus.CREATED,
+        message="Operation created",
+    )
+
+    async with session.begin():
+        session.add(operation)
+        await session.flush()
+
+        session.add(event)
+
+    return OperationResponse.model_validate(operation)
