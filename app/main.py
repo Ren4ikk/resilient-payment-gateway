@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
@@ -66,10 +66,16 @@ async def create_operation(
         message="Operation created",
     )
 
-    async with session.begin():
-        session.add(operation)
-        await session.flush()
+    try:
+        async with session.begin():
+            session.add(operation)
+            await session.flush()
 
-        session.add(event)
+            session.add(event)
+    except IntegrityError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Operation with this operationId already exists",
+        ) from error
 
     return OperationResponse.model_validate(operation)
