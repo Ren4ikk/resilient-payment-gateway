@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-_AMOUNT_PATTERN = re.compile(r"^\d{1,18}(?:\.\d{1,2})?$")
+_AMOUNT_PATTERN = re.compile(r"^(?:0|[1-9]\d{0,17})(?:\.\d{1,2})?$")
 
 
 class OperationCreateRequest(BaseModel):
