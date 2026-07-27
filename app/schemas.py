@@ -1,10 +1,11 @@
 import re
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models import OperationStatus
+from app.models import EventType, OperationStatus
 
 
 _AMOUNT_PATTERN = re.compile(r"^(?:0|[1-9]\d{0,17})(?:\.\d{1,2})?$")
@@ -66,4 +67,21 @@ class OperationResponse(BaseModel):
     status: OperationStatus
     provider_payment_id: str | None = Field(
         serialization_alias="providerPaymentId"
+    )
+
+
+class EventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    event_id: int = Field(serialization_alias="eventId")
+    type: EventType
+    from_status: OperationStatus | None = Field(
+        serialization_alias="fromStatus"
+    )
+    to_status: OperationStatus = Field(
+        serialization_alias="toStatus"
+    )
+    message: str
+    occurred_at: datetime = Field(
+        serialization_alias="occurredAt"
     )

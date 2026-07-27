@@ -1,13 +1,17 @@
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
 from app.models import Event, EventType, Operation, OperationStatus
-from app.schemas import OperationCreateRequest, OperationResponse
+from app.schemas import (
+    EventResponse,
+    OperationCreateRequest,
+    OperationResponse,
+)
 
 app = FastAPI(
     title="Resilient payment gateway",
@@ -79,3 +83,58 @@ async def create_operation(
         ) from error
 
     return OperationResponse.model_validate(operation)
+
+
+@app.get(
+    "/operations/{operation_id}",
+    response_model=OperationResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["operations"],
+    summary="Get operation",
+)
+async def get_operation(
+    operation_id: str,
+    session: DatabaseSession,
+) -> OperationResponse:
+    operation = await session.get(Operation, operation_id)
+
+    if operation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Operation not found",
+        )
+
+    return OperationResponse.model_validate(operation)
+
+
+@app.get(
+    "/operations/{operation_id}/events",
+    response_model=list[EventResponse],
+    status_code=status.HTTP_200_OK,
+    tags=["operations"],
+    summary="Get operation events",
+)
+async def get_operation_events(
+    operation_id: str,
+    session: DatabaseSession,
+) -> list[EventResponse]:
+    operation = await session.get(Operation, operation_id)
+
+    if operation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Operation not found",
+        )
+
+    result = await session.execute(
+        select(Event)
+        .where(Event.operation_id == operation_id)
+        .order_by(Event.event_id.asc())
+    )
+
+    events = result.scalars().all()
+
+    return [
+        EventResponse.model_validate(event)
+        for event in events
+    ]
