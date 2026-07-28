@@ -164,6 +164,17 @@ async def submit_operation(
 
         transitioned = update_result.rowcount == 1
 
+        if transitioned:
+            session.add(
+                Event(
+                    operation_id=operation_id,
+                    type=EventType.PROCESSING,
+                    from_status=OperationStatus.CREATED,
+                    to_status=OperationStatus.PROCESSING,
+                    message="Operation submitted for processing",
+                )
+            )
+
         operation = await session.get(Operation, operation_id)
 
         if operation is None:
