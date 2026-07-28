@@ -1,7 +1,7 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from sqlalchemy import select, text
+from fastapi import Depends, FastAPI, HTTPException, Response, status
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -138,3 +138,44 @@ async def get_operation_events(
         EventResponse.model_validate(event)
         for event in events
     ]
+
+
+@app.post(
+    "/operations/{operation_id}/submit",
+    response_model=OperationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["operations"],
+    summary="Submit operation",
+)
+async def submit_operation(
+    operation_id: str,
+    response: Response,
+    session: DatabaseSession,
+) -> OperationResponse:
+    async with session.begin():
+        update_result = await session.execute(
+            update(Operation)
+            .where(
+                Operation.operation_id == operation_id,
+                Operation.status == OperationStatus.CREATED,
+            )
+            .values(status=OperationStatus.PROCESSING)
+        )
+
+        transitioned = update_result.rowcount == 1
+
+        operation = await session.get(Operation, operation_id)
+
+        if operation is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Operation not found",
+            )
+
+    response.status_code = (
+        status.HTTP_202_ACCEPTED
+        if transitioned
+        else status.HTTP_200_OK
+    )
+
+    return OperationResponse.model_validate(operation)
