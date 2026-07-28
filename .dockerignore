@@ -1,3 +1,7 @@
 .git/
 .venv/
-__pycache__
+__pycache__/
+.idea/
+.pytest_cache/
+tests/
+requirements-dev.txt
