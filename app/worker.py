@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.database import async_session_factory
 from app.models import Operation, OperationStatus
@@ -16,6 +16,10 @@ class PendingOperation:
     operation_id: str
     amount: Decimal
     currency: str
+
+
+class ProviderPaymentIdConflictError(RuntimeError):
+    pass
 
 
 async def load_pending_operation() -> PendingOperation | None:
@@ -42,6 +46,46 @@ async def load_pending_operation() -> PendingOperation | None:
         )
 
 
+async def save_provider_payment_id(
+    operation_id: str,
+    provider_payment_id: str,
+) -> None:
+    async with async_session_factory() as session:
+        async with session.begin():
+            update_result = await session.execute(
+                update(Operation)
+                .where(
+                    Operation.operation_id == operation_id,
+                    Operation.provider_payment_id.is_(None),
+                )
+                .values(
+                    provider_payment_id=provider_payment_id,
+                )
+            )
+
+            if update_result.rowcount == 1:
+                return
+
+            operation = await session.get(
+                Operation,
+                operation_id,
+            )
+
+            if operation is None:
+                raise RuntimeError(
+                    f"Operation {operation_id!r} disappeared"
+                )
+
+            if (
+                operation.provider_payment_id
+                != provider_payment_id
+            ):
+                raise ProviderPaymentIdConflictError(
+                    "Operation already has another "
+                    "providerPaymentId"
+                )
+
+
 async def process_pending_operation_once(
     provider_client: ProviderClient,
 ) -> tuple[PendingOperation, ProviderPaymentResponse] | None:
@@ -54,6 +98,13 @@ async def process_pending_operation_once(
         operation_id=operation.operation_id,
         amount=operation.amount,
         currency=operation.currency,
+    )
+
+    await save_provider_payment_id(
+        operation_id=operation.operation_id,
+        provider_payment_id=(
+            provider_response.provider_payment_id
+        ),
     )
 
     return operation, provider_response
