@@ -1,6 +1,9 @@
+import asyncio
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
+import httpx
 from sqlalchemy import select, update
 
 from app.database import async_session_factory
@@ -9,6 +12,9 @@ from app.provider_client import (
     ProviderClient,
     ProviderPaymentResponse,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,9 +28,11 @@ class ProviderPaymentIdConflictError(RuntimeError):
     pass
 
 
-async def load_pending_operation() -> PendingOperation | None:
+async def load_pending_operation(
+    excluded_operation_ids: set[str] | None = None,
+) -> PendingOperation | None:
     async with async_session_factory() as session:
-        result = await session.execute(
+        statement = (
             select(Operation)
             .where(
                 Operation.status == OperationStatus.PROCESSING,
@@ -34,6 +42,14 @@ async def load_pending_operation() -> PendingOperation | None:
             .limit(1)
         )
 
+        if excluded_operation_ids:
+            statement = statement.where(
+                Operation.operation_id.not_in(
+                    excluded_operation_ids
+                )
+            )
+
+        result = await session.execute(statement)
         operation = result.scalar_one_or_none()
 
         if operation is None:
@@ -86,14 +102,10 @@ async def save_provider_payment_id(
                 )
 
 
-async def process_pending_operation_once(
+async def process_operation(
+    operation: PendingOperation,
     provider_client: ProviderClient,
-) -> tuple[PendingOperation, ProviderPaymentResponse] | None:
-    operation = await load_pending_operation()
-
-    if operation is None:
-        return None
-
+) -> ProviderPaymentResponse:
     provider_response = await provider_client.create_payment(
         operation_id=operation.operation_id,
         amount=operation.amount,
@@ -107,4 +119,109 @@ async def process_pending_operation_once(
         ),
     )
 
+    return provider_response
+
+
+async def process_pending_operation_once(
+    provider_client: ProviderClient,
+) -> tuple[PendingOperation, ProviderPaymentResponse] | None:
+    operation = await load_pending_operation()
+
+    if operation is None:
+        return None
+
+    provider_response = await process_operation(
+        operation,
+        provider_client,
+    )
+
     return operation, provider_response
+
+
+async def process_operation_with_retries(
+    operation: PendingOperation,
+    provider_client: ProviderClient,
+    *,
+    max_attempts: int = 5,
+    retry_delay_seconds: float = 2.0,
+) -> bool:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await process_operation(
+                operation,
+                provider_client,
+            )
+
+            return True
+
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 503:
+                raise
+
+            logger.warning(
+                "Provider returned 503 for operation %s, "
+                "attempt %d/%d",
+                operation.operation_id,
+                attempt,
+                max_attempts,
+            )
+
+        except httpx.RequestError as error:
+            logger.warning(
+                "Provider network error for operation %s, "
+                "attempt %d/%d: %s",
+                operation.operation_id,
+                attempt,
+                max_attempts,
+                error,
+            )
+
+        if attempt < max_attempts:
+            await asyncio.sleep(retry_delay_seconds)
+
+    return False
+
+
+async def run_provider_worker(
+    provider_client: ProviderClient,
+    *,
+    poll_interval_seconds: float = 1.0,
+) -> None:
+    exhausted_operation_ids: set[str] = set()
+
+    while True:
+        operation = await load_pending_operation(
+            exhausted_operation_ids
+        )
+
+        if operation is None:
+            await asyncio.sleep(poll_interval_seconds)
+            continue
+
+        try:
+            processed = await process_operation_with_retries(
+                operation,
+                provider_client,
+            )
+        except httpx.HTTPStatusError as error:
+            logger.error(
+                "Provider returned non-retryable status %d "
+                "for operation %s",
+                error.response.status_code,
+                operation.operation_id,
+            )
+
+            exhausted_operation_ids.add(
+                operation.operation_id
+            )
+            continue
+
+        if not processed:
+            exhausted_operation_ids.add(
+                operation.operation_id
+            )
+
+            logger.error(
+                "Provider retries exhausted for operation %s",
+                operation.operation_id,
+            )

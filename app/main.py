@@ -1,3 +1,7 @@
+import asyncio
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
@@ -12,10 +16,37 @@ from app.schemas import (
     OperationCreateRequest,
     OperationResponse,
 )
+from app.provider_client import ProviderClient
+from app.worker import run_provider_worker
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    provider_client = ProviderClient(
+        os.environ["PROVIDER_URL"]
+    )
+
+    worker_task = asyncio.create_task(
+        run_provider_worker(provider_client),
+        name="provider-worker",
+    )
+
+    try:
+        yield
+    finally:
+        worker_task.cancel()
+
+        try:
+            with suppress(asyncio.CancelledError):
+                await worker_task
+        finally:
+            await provider_client.aclose()
+
 
 app = FastAPI(
     title="Resilient payment gateway",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 DatabaseSession = Annotated[
