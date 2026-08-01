@@ -85,3 +85,34 @@ class EventResponse(BaseModel):
     occurred_at: datetime = Field(
         serialization_alias="occurredAt"
     )
+
+
+class ReceiptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_payment_id: str = Field(
+        validation_alias="providerPaymentId",
+        min_length=1,
+        strict=True,
+    )
+    operation_id: str = Field(
+        validation_alias="operationId",
+        min_length=1,
+        strict=True,
+    )
+    result: Literal["COMPLETED", "REJECTED"]
+    message: str
+    occurred_at: datetime = Field(
+        validation_alias="occurredAt"
+    )
+
+    @field_validator(
+        "provider_payment_id",
+        "operation_id",
+    )
+    @classmethod
+    def validate_identifier(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("identifier must not be blank")
+
+        return value

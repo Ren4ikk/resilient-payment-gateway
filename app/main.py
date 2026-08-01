@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +15,7 @@ from app.schemas import (
     EventResponse,
     OperationCreateRequest,
     OperationResponse,
+    ReceiptRequest,
 )
 from app.provider_client import ProviderClient
 from app.worker import run_provider_worker
@@ -221,3 +222,179 @@ async def submit_operation(
     )
 
     return OperationResponse.model_validate(operation)
+
+
+@app.post(
+    "/receipts",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    tags=["receipts"],
+    summary="Receive provider receipt",
+)
+async def receive_receipt(
+    payload: ReceiptRequest,
+    session: DatabaseSession,
+) -> Response:
+    target_status = OperationStatus(payload.result)
+
+    try:
+        async with session.begin():
+            result = await session.execute(
+                select(Operation)
+                .where(
+                    or_(
+                        Operation.operation_id
+                        == payload.operation_id,
+                        Operation.provider_payment_id
+                        == payload.provider_payment_id,
+                    )
+                )
+                .with_for_update()
+            )
+
+            operations = result.scalars().all()
+
+            operation_by_id = next(
+                (
+                    operation
+                    for operation in operations
+                    if operation.operation_id
+                    == payload.operation_id
+                ),
+                None,
+            )
+
+            operation_by_provider_id = next(
+                (
+                    operation
+                    for operation in operations
+                    if operation.provider_payment_id
+                    == payload.provider_payment_id
+                ),
+                None,
+            )
+
+            if (
+                operation_by_id is not None
+                and operation_by_provider_id is not None
+                and operation_by_id.operation_id
+                != operation_by_provider_id.operation_id
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "providerPaymentId belongs to "
+                        "another operation"
+                    ),
+                )
+
+            operation = (
+                operation_by_id
+                or operation_by_provider_id
+            )
+
+            if operation is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Operation not found",
+                )
+
+            if operation.operation_id != payload.operation_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Receipt contains another operationId",
+                )
+
+            if (
+                operation.provider_payment_id is not None
+                and operation.provider_payment_id
+                != payload.provider_payment_id
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "Operation already has another "
+                        "providerPaymentId"
+                    ),
+                )
+
+            if operation.provider_payment_id is None:
+                operation.provider_payment_id = (
+                    payload.provider_payment_id
+                )
+
+            current_status = operation.status
+
+            if current_status in {
+                OperationStatus.COMPLETED,
+                OperationStatus.REJECTED,
+            }:
+                if current_status != target_status:
+                    session.add(
+                        Event(
+                            operation_id=operation.operation_id,
+                            type=EventType.RECEIPT_IGNORED,
+                            from_status=current_status,
+                            to_status=current_status,
+                            message=(
+                                "Ignored late receipt with "
+                                f"result {target_status.value}: "
+                                f"{payload.message}"
+                            ),
+                            occurred_at=payload.occurred_at,
+                        )
+                    )
+
+                return Response(
+                    status_code=status.HTTP_204_NO_CONTENT
+                )
+
+            if current_status != OperationStatus.PROCESSING:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Operation is not processing",
+                )
+
+            operation.status = target_status
+
+            session.add(
+                Event(
+                    operation_id=operation.operation_id,
+                    type=EventType(target_status.value),
+                    from_status=current_status,
+                    to_status=target_status,
+                    message=payload.message,
+                    occurred_at=payload.occurred_at,
+                )
+            )
+
+
+    except IntegrityError as error:
+        original_error = (
+            getattr(error.orig, "__cause__", None)
+            or error.orig
+        )
+
+        constraint_name = getattr(
+            original_error,
+            "constraint_name",
+            None,
+        )
+
+        if (
+            constraint_name
+            == "uq_operations_provider_payment_id"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "providerPaymentId belongs to "
+                    "another operation"
+                ),
+            ) from error
+
+        raise
+
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT
+    )
