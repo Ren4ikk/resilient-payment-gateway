@@ -36,7 +36,6 @@ async def load_pending_operation(
             select(Operation)
             .where(
                 Operation.status == OperationStatus.PROCESSING,
-                Operation.provider_payment_id.is_(None),
             )
             .order_by(Operation.created_at.asc())
             .limit(1)
@@ -187,11 +186,11 @@ async def run_provider_worker(
     *,
     poll_interval_seconds: float = 1.0,
 ) -> None:
-    exhausted_operation_ids: set[str] = set()
+    handled_operation_ids: set[str] = set()
 
     while True:
         operation = await load_pending_operation(
-            exhausted_operation_ids
+            handled_operation_ids
         )
 
         if operation is None:
@@ -211,16 +210,16 @@ async def run_provider_worker(
                 operation.operation_id,
             )
 
-            exhausted_operation_ids.add(
+            handled_operation_ids.add(
                 operation.operation_id
             )
             continue
 
-        if not processed:
-            exhausted_operation_ids.add(
-                operation.operation_id
-            )
+        handled_operation_ids.add(
+            operation.operation_id
+        )
 
+        if not processed:
             logger.error(
                 "Provider retries exhausted for operation %s",
                 operation.operation_id,
