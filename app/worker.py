@@ -8,6 +8,7 @@ import httpx
 from sqlalchemy import select, update
 
 from app.database import async_session_factory
+from app.metrics import record_provider_retry
 from app.models import Operation, OperationStatus
 from app.provider_client import (
     ProviderClient,
@@ -166,6 +167,8 @@ async def process_operation_with_retries(
     jitter_seconds: float = 0.5,
 ) -> bool:
     for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            record_provider_retry()
         try:
             await process_operation(
                 operation,

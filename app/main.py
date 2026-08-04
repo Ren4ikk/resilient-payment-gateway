@@ -2,14 +2,17 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
-from sqlalchemy import or_, select, text, update
+from fastapi.responses import PlainTextResponse
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
+from app.metrics import get_provider_retries_total
 from app.models import Event, EventType, Operation, OperationStatus
 from app.schemas import (
     EventResponse,
@@ -55,6 +58,8 @@ DatabaseSession = Annotated[
     Depends(get_db_session),
 ]
 
+PROCESSING_AGE_THRESHOLD_SECONDS = 30
+
 
 @app.get(
     "/health",
@@ -72,6 +77,71 @@ async def health(session: DatabaseSession) -> dict[str, str]:
         ) from error
 
     return {"status": "ok"}
+
+
+@app.get(
+    "/metrics",
+    response_class=PlainTextResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["system"],
+    summary="Get service metrics",
+)
+async def get_metrics(
+    session: DatabaseSession,
+) -> PlainTextResponse:
+    processing_cutoff = (
+        datetime.now(UTC)
+        - timedelta(
+            seconds=PROCESSING_AGE_THRESHOLD_SECONDS
+        )
+    )
+
+    result = await session.execute(
+        select(
+            func.count(
+                func.distinct(Operation.operation_id)
+            )
+        )
+        .select_from(Operation)
+        .join(
+            Event,
+            and_(
+                Event.operation_id
+                == Operation.operation_id,
+                Event.type == EventType.PROCESSING,
+            ),
+        )
+        .where(
+            Operation.status
+            == OperationStatus.PROCESSING,
+            Event.occurred_at < processing_cutoff,
+        )
+    )
+
+    stale_processing_count = result.scalar_one()
+    provider_retries_total = (
+        get_provider_retries_total()
+    )
+
+    metrics_body = (
+        "# HELP payment_gateway_processing_operations "
+        "Operations in PROCESSING longer than threshold\n"
+        "# TYPE payment_gateway_processing_operations gauge\n"
+        "payment_gateway_processing_operations"
+        f'{{older_than_seconds="'
+        f'{PROCESSING_AGE_THRESHOLD_SECONDS}"}} '
+        f"{stale_processing_count}\n"
+        "# HELP payment_gateway_provider_retries_total "
+        "Provider retry attempts since process start\n"
+        "# TYPE payment_gateway_provider_retries_total counter\n"
+        "payment_gateway_provider_retries_total "
+        f"{provider_retries_total}\n"
+    )
+
+    return PlainTextResponse(
+        content=metrics_body,
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 @app.post(
