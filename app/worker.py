@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -15,6 +16,24 @@ from app.provider_client import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def calculate_retry_delay(
+    attempt: int,
+    *,
+    base_delay_seconds: float,
+    max_delay_seconds: float,
+    jitter_seconds: float,
+) -> float:
+    backoff_seconds = min(
+        base_delay_seconds * 2 ** (attempt - 1),
+        max_delay_seconds,
+    )
+
+    return backoff_seconds + random.uniform(
+        0.0,
+        jitter_seconds,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +161,9 @@ async def process_operation_with_retries(
     provider_client: ProviderClient,
     *,
     max_attempts: int = 5,
-    retry_delay_seconds: float = 2.0,
+    base_retry_delay_seconds: float = 1.0,
+    max_retry_delay_seconds: float = 8.0,
+    jitter_seconds: float = 0.5,
 ) -> bool:
     for attempt in range(1, max_attempts + 1):
         try:
@@ -176,7 +197,27 @@ async def process_operation_with_retries(
             )
 
         if attempt < max_attempts:
-            await asyncio.sleep(retry_delay_seconds)
+            retry_delay_seconds = calculate_retry_delay(
+                attempt,
+                base_delay_seconds=(
+                    base_retry_delay_seconds
+                ),
+                max_delay_seconds=(
+                    max_retry_delay_seconds
+                ),
+                jitter_seconds=jitter_seconds,
+            )
+
+            logger.warning(
+                "Retrying provider request for operation "
+                "%s in %.2f seconds",
+                operation.operation_id,
+                retry_delay_seconds,
+            )
+
+            await asyncio.sleep(
+                retry_delay_seconds
+            )
 
     return False
 
