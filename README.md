@@ -52,11 +52,36 @@ http://localhost:8080/docs
 | Метод | Маршрут | Назначение |
 |---|---|---|
 | `GET` | `/health` | Проверить готовность сервиса |
+| `GET` | `/metrics` | Получить метрики сервиса |
 | `POST` | `/operations` | Создать операцию |
 | `POST` | `/operations/{id}/submit` | Запланировать отправку |
 | `GET` | `/operations/{id}` | Получить текущее состояние |
 | `GET` | `/operations/{id}/events` | Получить историю событий |
 | `POST` | `/receipts` | Принять callback-квитанцию провайдера |
+
+## Метрики
+
+Сервис предоставляет метрики в текстовом формате Prometheus:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Доступны:
+
+- количество операций в `PROCESSING` дольше 30 секунд;
+- количество повторных запросов к провайдеру с момента запуска процесса.
+
+Пример ответа:
+
+```text
+# TYPE payment_gateway_processing_operations gauge
+payment_gateway_processing_operations{older_than_seconds="30"} 0
+# TYPE payment_gateway_provider_retries_total counter
+payment_gateway_provider_retries_total 0
+```
+
+Для просмотра метрик запуск отдельного сервера Prometheus не требуется.
 
 ## Сквозной сценарий
 
@@ -137,7 +162,13 @@ CREATED → PROCESSING → COMPLETED/REJECTED
 
 ## Проверка восстановления после перезапуска
 
-Создайте ещё одну операцию:
+Для воспроизводимой проверки временно остановите провайдера:
+
+```bash
+docker compose stop provider-simulator
+```
+
+Создайте операцию:
 
 ```bash
 RECOVERY_ID="recovery-$(date +%s)"
@@ -157,10 +188,18 @@ curl --include \
   "http://localhost:8080/operations/${RECOVERY_ID}/submit"
 ```
 
-Сразу остановите и снова запустите сервис кандидата:
+Поскольку провайдер остановлен, операция останется в `PROCESSING`.
+
+Остановите сервис кандидата:
 
 ```bash
 docker compose stop candidate-service
+```
+
+Снова запустите провайдера и сервис кандидата:
+
+```bash
+docker compose start provider-simulator
 docker compose start candidate-service
 docker compose up --wait
 ```
@@ -172,7 +211,9 @@ curl --include \
   "http://localhost:8080/operations/${RECOVERY_ID}"
 ```
 
-Операция и её история сохраняются в PostgreSQL. Если операция осталась в `PROCESSING`, worker автоматически продолжит её отправку с прежним `Idempotency-Key`, равным `operationId`.
+После запуска worker находит сохранённую операцию `PROCESSING` и продолжает отправку с прежним `Idempotency-Key`, равным `operationId`.
+
+Через несколько секунд операция должна получить финальный статус `COMPLETED` или `REJECTED`.
 
 При восстановлении не используется `docker compose down -v`, поскольку флаг `-v` удаляет volume PostgreSQL вместе с данными.
 
@@ -190,13 +231,19 @@ docker compose up --build --wait
 python -m pip install -r requirements-dev.txt
 ```
 
-Запустите тесты:
+Запустите тесты из корня проекта:
 
 ```bash
-python -m pytest
+python -m pytest -v
 ```
 
-Тесты проверяют конкурентные запросы `submit` и конкурентную обработку одинаковых callback-квитанций.
+Тесты проверяют:
+
+- конкурентные запросы `submit`;
+- конкурентную обработку одинаковых callback-квитанций;
+- восстановление операции `PROCESSING` после перезапуска сервиса.
+
+Интеграционные тесты управляют контейнерами через `docker compose`, поэтому Docker должен быть запущен. Тесты не следует запускать параллельно.
 
 ## Хранение данных
 
@@ -225,7 +272,8 @@ docker compose down -v
 - намерение отправки сохраняется до обращения к провайдеру;
 - только первый `submit` переводит операцию из `CREATED` в `PROCESSING`;
 - `Idempotency-Key` и `X-Correlation-ID` равны `operationId`;
-- сетевые ошибки и `503` повторяются с тем же ключом;
+- сетевые ошибки и `503` повторяются с тем же ключом с использованием ограниченного exponential backoff и jitter;
 - финальный статус устанавливается только callback-квитанцией;
 - повторная квитанция не создаёт повторный переход;
-- незавершённые операции автоматически восстанавливаются после перезапуска.
+- незавершённые операции автоматически восстанавливаются после перезапуска;
+- фоновый worker корректно завершается при штатной остановке сервиса.
